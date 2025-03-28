@@ -9,8 +9,9 @@
 */
 #include "ad7124.h"
 #include <stdbool.h>
+#include <zephyr/logging/log.h>
 
-
+LOG_MODULE_REGISTER(AD7124_CORE, LOG_LEVEL_INF);
 /* Error codes */
 #define INVALID_VAL -1 /* Invalid argument */
 #define COMM_ERR    -2 /* Communication error on receive */
@@ -69,8 +70,11 @@ int32_t ad7124_no_check_read_register(struct ad7124_dev *dev,
 	//			 ((dev->use_crc != AD7124_DISABLE_CRC) ? p_reg->size + 1 : p_reg->size) + 1 + add_status_length);
 	ret = dev->tranceiver(dev->handle, bufsend, bufrec, ((dev->use_crc != AD7124_DISABLE_CRC) ? p_reg->size + 1 : p_reg->size) + 1 + add_status_length);
 
-	if(ret < 0)
+	if(ret < 0) {
+		LOG_ERR("error register addr %d", p_reg->addr);
 		return ret;
+	}
+		
 
 	/* Check the CRC */
 	if(dev->use_crc == AD7124_USE_CRC) {
@@ -124,8 +128,11 @@ int32_t ad7124_no_check_write_register(struct ad7124_dev *dev,
 	uint8_t i = 0;
 	uint8_t crc8 = 0;
 
-	if(!dev)
-		return INVALID_VAL;
+	if(!dev) {
+		LOG_ERR("device not found!");
+		return INVALID_VAL;		
+	}
+		
 
 	/* Build the Command word */
 	wr_buf[0] = AD7124_COMM_REG_WEN | AD7124_COMM_REG_WR |
@@ -175,8 +182,11 @@ int32_t ad7124_read_register(struct ad7124_dev *dev,
 	if (p_reg->addr != AD7124_ERR_REG && dev->check_ready) {
 		ret = ad7124_wait_for_spi_ready(dev,
 						dev->spi_rdy_poll_cnt);
-		if (ret < 0)
+		if (ret < 0) {
+			LOG_ERR("err register %d", p_reg->addr);
 			return ret;
+		}
+			
 	}
 	ret = ad7124_no_check_read_register(dev,
 					    p_reg);
@@ -201,7 +211,10 @@ int32_t ad7124_write_register(struct ad7124_dev *dev,
 
 	if (dev->check_ready) {
 		ret = ad7124_wait_for_spi_ready(dev, dev->spi_rdy_poll_cnt);
-		if (ret < 0) return ret;
+		if (ret < 0) {
+			LOG_ERR("timeout spi ready");
+			return ret;			
+		}
 	}
 	ret = ad7124_no_check_write_register(dev, p_reg);
 
@@ -263,13 +276,17 @@ int32_t ad7124_wait_for_spi_ready(struct ad7124_dev *dev,
 	while(!ready && --timeout) {
 		/* Read the value of the Error Register */
 		ret = ad7124_read_register(dev, &regs[AD7124_Error]);
-		if(ret < 0)
+		if(ret < 0) {
+			LOG_ERR("error reading error register");
 			return ret;
+		}
+			
 
 		/* Check the SPI IGNORE Error bit in the Error Register */
 		ready = (regs[AD7124_Error].value &
 			 AD7124_ERR_REG_SPI_IGNORE_ERR) == 0;
 	}
+	if(!timeout) LOG_ERR("timeout occured");
 
 	return timeout ? 0 : TIMEOUT;
 }
@@ -476,8 +493,10 @@ int32_t ad7124_setup(struct ad7124_dev *device)
 	    reg_nr++) {
 		if (device->regs[reg_nr].rw == AD7124_RW) {
 			ret = ad7124_write_register(device, device->regs[reg_nr]);
-			if (ret < 0)
-				break;
+			if (ret < 0) {
+				LOG_ERR("error setup writing %d", reg_nr);
+				return -1;
+			}
 		}
 
 		/* Get CRC State and device SPI interface settings */

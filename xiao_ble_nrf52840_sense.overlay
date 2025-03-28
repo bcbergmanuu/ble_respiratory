@@ -44,8 +44,8 @@
 	status = "disabled";
 };
 
-&spi2 {
-    status = "okay";
+&spi2 {    
+	status = "okay";
 	cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;	
 	
 	gendev: gendev@0 {

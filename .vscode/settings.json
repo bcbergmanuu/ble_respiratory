@@ -10,6 +10,8 @@
         ]
     },
     "files.associations": {
-        "ad7124.h": "c"
+        "ad7124.h": "c",
+        "ad7124_ble.h": "c",
+        "storage_nvs.h": "c",
     }
 }

@@ -14,9 +14,19 @@ Copyright (c) 2019 Analog Devices, Inc.  All rights reserved.
 #include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
 
+#include <zephyr/settings/settings.h>
+
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
+
+
 #include "ad7124.h"
 #include "ad7124_regs.h"
 #include "ad7124_support.h"
+#include "storage_nvs.h"
 
 #include "ad7124_ble.h"
 #include "config_respiratory.h"
@@ -24,7 +34,7 @@ Copyright (c) 2019 Analog Devices, Inc.  All rights reserved.
 #define SPI_OP  SPI_OP_MODE_MASTER |SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8) | SPI_LINES_SINGLE
 
 
-LOG_MODULE_REGISTER(AD7124_APP, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(AD7124_BLE, LOG_LEVEL_INF);
 
 #define AD7124_CHANNEL_COUNT 16
 
@@ -37,7 +47,7 @@ LOG_MODULE_REGISTER(AD7124_APP, LOG_LEVEL_INF);
 #define SPIOP      SPI_WORD_SET(8) | SPI_TRANSFER_MSB
 
 const struct spi_dt_spec spiDevice = SPI_DT_SPEC_GET(DT_NODELABEL(gendev), SPIOP, 0);
-
+static bool isConnected = false;
 /*
  * @brief  Write generic device register (platform dependent)
  *
@@ -48,6 +58,182 @@ const struct spi_dt_spec spiDevice = SPI_DT_SPEC_GET(DT_NODELABEL(gendev), SPIOP
  * @param  len       number of consecutive bytes to write
  *
  */
+
+ //primary custom service 
+ static struct bt_uuid_128 uuid_ad7124_prim = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0xa6c47c93, 0x1119, 0x4ca5, 0x176e, 0xdffb871f11f0));
+
+//unique device
+static struct bt_uuid_128 uuid_identifier = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x56a331ec, 0x0319, 0x493e, 0xbd4d, 0xe778c69badd7));
+
+//current memory position
+static struct bt_uuid_128 uuid_data = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x84b45e35, 0x140b, 0x4d33, 0x92c6, 0x386d8bff160d));
+
+static uint8_t uniqueIdentifier_value[sizeof(uint16_t)];
+
+static ssize_t read_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+		void *buf, uint16_t len, uint16_t offset) {
+
+	uint16_t uniqueId = 0;
+	read_uniqueidentifier(&uniqueId);
+	memcpy(uniqueIdentifier_value, &uniqueId, sizeof(uint16_t));
+
+	const uint8_t *value = attr->user_data;	
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(uniqueIdentifier_value));
+}
+
+static int32_t do_continuous_conversion();
+static int32_t do_fullscale_calibration();
+
+static ssize_t write_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+	const void *buf, uint16_t len, uint16_t offset,
+	uint8_t flags) {
+
+	uint8_t *value = attr->user_data;
+
+	if (offset + len > sizeof(uniqueIdentifier_value)) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	memcpy(value + offset, buf, len);
+
+	uint16_t uniqueId = 0;
+	memcpy(&uniqueId, value, sizeof(uint16_t));
+	write_uniqueIdentifier(&uniqueId);
+
+	return len;
+}
+
+#define ble_buff_size (5*sizeof(uint32_t))
+static uint8_t ad7124_ble_buff[ble_buff_size]; //size of packed protobuf
+
+
+static ssize_t read_ad_buffer(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+	void *buf, uint16_t len, uint16_t offset)
+{	
+
+	const uint8_t *value = attr->user_data;	
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(ad7124_ble_buff));
+}
+
+static uint8_t notify_ad_buffer_on = 0;
+
+static void ble_ad_buffer_notify_changed(const struct bt_gatt_attr *attr, uint16_t value) {
+	notify_ad_buffer_on = (value == BT_GATT_CCC_NOTIFY) ? 1 : 0;
+}
+
+
+void ble_notify_adbuffer_proc(struct k_work *ptrWorker);
+
+K_WORK_DEFINE(ble_notify_task, ble_notify_adbuffer_proc);
+
+
+
+/* AD7124 readout primary Service Declaration */
+BT_GATT_SERVICE_DEFINE(ad7124_svc,
+	BT_GATT_PRIMARY_SERVICE(&uuid_ad7124_prim),
+	
+	BT_GATT_CHARACTERISTIC(&uuid_identifier.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       read_identifier, write_identifier, uniqueIdentifier_value),	
+
+	BT_GATT_CHARACTERISTIC(&uuid_data.uuid, 
+	 		       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+	 		       BT_GATT_PERM_READ,
+	 		       read_ad_buffer, NULL, ad7124_ble_buff),
+	BT_GATT_CCC(ble_ad_buffer_notify_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
+/// @brief Notify BLE when data ready
+/// @param ptrWorker 
+void ble_notify_adbuffer_proc(struct k_work *ptrWorker) {					
+	if(!notify_ad_buffer_on) return;
+	
+	struct bt_gatt_attr *notify_attr = bt_gatt_find_by_uuid(ad7124_svc.attrs, ad7124_svc.attr_count, &uuid_data.uuid);	
+	struct bt_gatt_notify_params params = {
+        .attr = notify_attr,
+        .data = ad7124_ble_buff,
+        .len  = sizeof(ad7124_ble_buff),
+      //  .func = notify_complete_cb, 
+    };
+
+	int ret = bt_gatt_notify_cb(NULL, &params);
+	if(ret < 0) {
+		LOG_ERR("error notify data %d", ret);
+	}
+}
+
+//advertising data packet
+const struct bt_data ad[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_BAS_VAL), BT_UUID_16_ENCODE(BT_UUID_CTS_VAL)),
+};
+
+static void start_ad7124(struct k_work *ptr_work) {
+	int err =0;
+	err |= do_fullscale_calibration();
+	err |= do_continuous_conversion();
+	if(err) {
+		LOG_ERR("error start ad %d", err);		
+	}	
+}
+
+K_WORK_DEFINE(continuous_conversion_task, start_ad7124);
+
+static void connected(struct bt_conn *conn, uint8_t err)
+{
+	if (err) {
+		LOG_INF("Connection failed (err 0x%02x)\n", err);
+	} else {
+		isConnected = true;
+		LOG_INF("Connected\n");
+		k_work_submit(&continuous_conversion_task);
+	}
+}
+
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	LOG_INF("Disconnected (reason 0x%02x)\n", reason);
+	isConnected = false;	
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = connected,
+	.disconnected = disconnected,	
+};
+
+
+static void bt_ready(void)
+{
+	int err;
+
+	LOG_INF("Bluetooth initialized\n");	
+
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		settings_load();
+	}
+
+	err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
+	if (err) {
+		LOG_ERR("Advertising failed to start (err %d)\n", err);
+		return;
+	}
+
+	LOG_INF("Advertising successfully started\n");
+}
+
+static struct bt_conn_auth_cb auth_cb_display = {
+	.passkey_display = NULL,// auth_passkey_display,
+	.passkey_entry = NULL,
+	.cancel = NULL,
+	.passkey_confirm = NULL,	
+};
+
 static int32_t platform_transceive(void *handle, uint8_t *bufw, uint8_t *bufr,
                               size_t len)
 {  	
@@ -64,10 +250,7 @@ static int32_t platform_transceive(void *handle, uint8_t *bufw, uint8_t *bufr,
 	return err;	
 }
 
-/// @brief generate delay
-/// @param ms delay time ms
-static void platform_delay(uint32_t ms) {
-	LOG_INF("dela for %d", ms);
+static void platform_delay(uint32_t ms) {	
 	k_sleep(K_MSEC(ms));
 }
 
@@ -142,6 +325,9 @@ static int32_t set_idle_mode() {
 	return error_code;
 }
 
+#define conversionBufSize 5
+uint32_t conversionBuffer[conversionBufSize];
+
 
 /*!
  * @brief      Continuously acquires samples in Continuous Conversion mode
@@ -150,8 +336,9 @@ static int32_t set_idle_mode() {
  *            and assigned to the channel they come from. Escape key an be used
  *            to exit the loop
  */
-static int32_t do_continuous_conversion(bool doVoltageConvertion)
+static int32_t do_continuous_conversion()
 {
+	uint8_t conversionCounter = 0;
 	int32_t error_code = 0;
 	int32_t sample_data = 0;	
 	
@@ -171,7 +358,7 @@ static int32_t do_continuous_conversion(bool doVoltageConvertion)
 
 	uint8_t channel_read = 0;
 	// Continuously read the channels, and store sample values		
-    while (1) {
+    while (isConnected) {
 		
 
 		/*
@@ -198,11 +385,19 @@ static int32_t do_continuous_conversion(bool doVoltageConvertion)
 			
 				LOG_INF("Label");
 			}
+									
+			LOG_INF("%i", sample_data);			
 			
-			if(doVoltageConvertion) {
-				LOG_INF("%.8f", (double) ad7124_convert_sample_to_voltage(&pAd7124_dev, channel_read, sample_data) );				
-			} else { LOG_INF("%i", sample_data); }
-		}		
+			conversionBuffer[conversionCounter] = sample_data;
+			if(conversionCounter > conversionBufSize -1) {
+				conversionCounter = 0;
+				//prepare data
+				memcpy(ad7124_ble_buff, conversionBuffer, conversionBufSize * sizeof(uint32_t));
+				//start notify task
+				k_work_submit(&ble_notify_task);
+			}
+			
+		}				
 	}    
 
 	error_code = set_idle_mode();
@@ -362,28 +557,64 @@ static int read_id(uint8_t *id)
 	int err = 0;
 	if (ad7124_read_register(&pAd7124_dev, &pAd7124_dev.regs[AD7124_ID]) < 0) {
 	   LOG_ERR("\r\nError Encountered reading ID register\r\n");
+	   return -1;
 	} 
 	*id = (uint8_t)pAd7124_dev.regs[AD7124_ID].value;
 	LOG_INF("\r\nRead ID Register = 0x%d\n",*id);
 	return err;	
 }
 
-extern void start_ad() {
-	LOG_INF("Version 2");
+int init_ad7124(void) {	
+	LOG_INF("initiating ad7124..");
 	int err = 0;
 		
-
 	bool spiReady = spi_is_ready_dt(&spiDevice);
 	if(!spiReady) LOG_ERR("Error: SPI device is not ready: %d", spiReady);
 	uint8_t chipId =0;
 	err |= ad7124_app_initialize(AD7124_CONFIG_A);	
-	err |= read_id(&chipId);
-	if(chipId != 0x14) {
-		LOG_ERR("id incorrect %#02x", chipId);
-	}
-	err |= do_fullscale_calibration();
-	err |= do_continuous_conversion(true);
 	if(err) {
-		LOG_ERR("error start ad %d", err);
+		LOG_ERR("error initializing ad7124");
+		return -1;
 	}
+	err |= read_id(&chipId);	
+	if(err) {
+		LOG_ERR("error reading id");
+		return -1;
+	}
+	if(chipId != 0x14) {
+		LOG_ERR("id incorrect: %#02x, but expected 0x14", chipId);
+		return -1;
+	}
+	return 0;
 }
+
+
+
+static struct bt_gatt_cb gatt_callbacks = {
+	
+};
+
+int ble_load(void)
+{		
+	LOG_INF("loading ble");
+	int err;
+
+	err = bt_enable(NULL);
+	if (err) {
+		LOG_INF("Bluetooth init failed (err %d)\n", err);
+		return -EADV;
+	}
+
+	bt_ready();
+
+	bt_gatt_cb_register(&gatt_callbacks);
+	bt_conn_auth_cb_register(&auth_cb_display);
+
+	//clean up bonds
+	bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
+	return 0;
+}
+
+
+SYS_INIT(ble_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+SYS_INIT(init_ad7124, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

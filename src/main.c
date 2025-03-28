@@ -5,9 +5,7 @@
 
 int main(void)
 {	
-	start_ad();	
-	
-	
-
+	k_sleep(K_FOREVER);
 	return 0;
+
 }
