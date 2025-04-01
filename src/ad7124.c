@@ -281,10 +281,11 @@ int32_t ad7124_wait_for_spi_ready(struct ad7124_dev *dev,
 			return ret;
 		}
 			
-
+		
 		/* Check the SPI IGNORE Error bit in the Error Register */
 		ready = (regs[AD7124_Error].value &
 			 AD7124_ERR_REG_SPI_IGNORE_ERR) == 0;
+		dev->ptDelay(100);
 	}
 	if(!timeout) LOG_ERR("timeout occured");
 
@@ -356,6 +357,7 @@ int32_t ad7124_wait_for_conv_ready(struct ad7124_dev *dev,
 		/* Check the RDY bit in the Status Register */
 		ready = (regs[AD7124_Status].value &
 			 AD7124_STATUS_REG_RDY) == 0;
+		dev->ptDelay(200);
 	}
 
 	return timeout ? 0 : TIMEOUT;
@@ -477,7 +479,7 @@ void ad7124_update_dev_spi_settings(struct ad7124_dev *dev)
 *******************************************************************************/
 int32_t ad7124_setup(struct ad7124_dev *device)
 {
-	int32_t ret;
+	int32_t ret; 
 	enum ad7124_registers reg_nr;			
 
 	/*  Reset the device interface.*/

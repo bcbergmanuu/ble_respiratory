@@ -26,7 +26,6 @@ Copyright (c) 2019 Analog Devices, Inc.  All rights reserved.
 #include "ad7124.h"
 #include "ad7124_regs.h"
 #include "ad7124_support.h"
-#include "storage_nvs.h"
 
 #include "ad7124_ble.h"
 #include "config_respiratory.h"
@@ -47,7 +46,7 @@ LOG_MODULE_REGISTER(AD7124_BLE, LOG_LEVEL_INF);
 #define SPIOP      SPI_WORD_SET(8) | SPI_TRANSFER_MSB
 
 const struct spi_dt_spec spiDevice = SPI_DT_SPEC_GET(DT_NODELABEL(gendev), SPIOP, 0);
-static bool isConnected = false;
+static void start_ad7124(struct k_work *ptr_work);
 /*
  * @brief  Write generic device register (platform dependent)
  *
@@ -64,47 +63,47 @@ static bool isConnected = false;
 	BT_UUID_128_ENCODE(0xa6c47c93, 0x1119, 0x4ca5, 0x176e, 0xdffb871f11f0));
 
 //unique device
-static struct bt_uuid_128 uuid_identifier = BT_UUID_INIT_128(
-	BT_UUID_128_ENCODE(0x56a331ec, 0x0319, 0x493e, 0xbd4d, 0xe778c69badd7));
+// static struct bt_uuid_128 uuid_identifier = BT_UUID_INIT_128(
+// 	BT_UUID_128_ENCODE(0x56a331ec, 0x0319, 0x493e, 0xbd4d, 0xe778c69badd7));
 
 //current memory position
 static struct bt_uuid_128 uuid_data = BT_UUID_INIT_128(
 	BT_UUID_128_ENCODE(0x84b45e35, 0x140b, 0x4d33, 0x92c6, 0x386d8bff160d));
 
-static uint8_t uniqueIdentifier_value[sizeof(uint16_t)];
+// static uint8_t uniqueIdentifier_value[sizeof(uint16_t)];
 
-static ssize_t read_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-		void *buf, uint16_t len, uint16_t offset) {
+// static ssize_t read_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+// 		void *buf, uint16_t len, uint16_t offset) {
 
-	uint16_t uniqueId = 0;
-	read_uniqueidentifier(&uniqueId);
-	memcpy(uniqueIdentifier_value, &uniqueId, sizeof(uint16_t));
+// 	uint16_t uniqueId = 0;
+// 	read_uniqueidentifier(&uniqueId);
+// 	memcpy(uniqueIdentifier_value, &uniqueId, sizeof(uint16_t));
 
-	const uint8_t *value = attr->user_data;	
+// 	const uint8_t *value = attr->user_data;	
 
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(uniqueIdentifier_value));
-}
+// 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(uniqueIdentifier_value));
+// }
 
 static int32_t do_continuous_conversion();
 static int32_t do_fullscale_calibration();
 
-static ssize_t write_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-	const void *buf, uint16_t len, uint16_t offset,
-	uint8_t flags) {
+// static ssize_t write_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+// 	const void *buf, uint16_t len, uint16_t offset,
+// 	uint8_t flags) {
 
-	uint8_t *value = attr->user_data;
+// 	uint8_t *value = attr->user_data;
 
-	if (offset + len > sizeof(uniqueIdentifier_value)) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	memcpy(value + offset, buf, len);
+// 	if (offset + len > sizeof(uniqueIdentifier_value)) {
+// 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+// 	}
+// 	memcpy(value + offset, buf, len);
 
-	uint16_t uniqueId = 0;
-	memcpy(&uniqueId, value, sizeof(uint16_t));
-	write_uniqueIdentifier(&uniqueId);
+// 	uint16_t uniqueId = 0;
+// 	memcpy(&uniqueId, value, sizeof(uint16_t));
+// 	write_uniqueIdentifier(&uniqueId);
 
-	return len;
-}
+// 	return len;
+// }
 
 #define ble_buff_size (5*sizeof(uint32_t))
 static uint8_t ad7124_ble_buff[ble_buff_size]; //size of packed protobuf
@@ -119,10 +118,25 @@ static ssize_t read_ad_buffer(struct bt_conn *conn, const struct bt_gatt_attr *a
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(ad7124_ble_buff));
 }
 
+K_WORK_DEFINE(continuous_conversion_task, start_ad7124);
+
+K_THREAD_STACK_DEFINE(my_stack_area, 1024);
+
+struct k_work_q my_work_q;
+
+
+
 static uint8_t notify_ad_buffer_on = 0;
 
 static void ble_ad_buffer_notify_changed(const struct bt_gatt_attr *attr, uint16_t value) {
+	ARG_UNUSED(attr);
+	LOG_INF("notify_changed: %d", value);
 	notify_ad_buffer_on = (value == BT_GATT_CCC_NOTIFY) ? 1 : 0;
+	if(value == BT_GATT_CCC_NOTIFY)	{
+		LOG_INF("starting conversion task");
+		k_work_submit_to_queue(&my_work_q, &continuous_conversion_task);		
+		LOG_INF("conversion task started");
+	}
 }
 
 
@@ -136,10 +150,10 @@ K_WORK_DEFINE(ble_notify_task, ble_notify_adbuffer_proc);
 BT_GATT_SERVICE_DEFINE(ad7124_svc,
 	BT_GATT_PRIMARY_SERVICE(&uuid_ad7124_prim),
 	
-	BT_GATT_CHARACTERISTIC(&uuid_identifier.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
-			       read_identifier, write_identifier, uniqueIdentifier_value),	
+	// BT_GATT_CHARACTERISTIC(&uuid_identifier.uuid,
+	// 		       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+	// 		       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+	// 		       read_identifier, write_identifier, uniqueIdentifier_value),	
 
 	BT_GATT_CHARACTERISTIC(&uuid_data.uuid, 
 	 		       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
@@ -183,23 +197,20 @@ static void start_ad7124(struct k_work *ptr_work) {
 	}	
 }
 
-K_WORK_DEFINE(continuous_conversion_task, start_ad7124);
+
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
 		LOG_INF("Connection failed (err 0x%02x)\n", err);
-	} else {
-		isConnected = true;
-		LOG_INF("Connected\n");
-		k_work_submit(&continuous_conversion_task);
+	} else {		
+		LOG_INF("Connected\n");		
 	}
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	LOG_INF("Disconnected (reason 0x%02x)\n", reason);
-	isConnected = false;	
+	LOG_INF("Disconnected (reason 0x%02x)\n", reason);	
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -340,7 +351,7 @@ static int32_t do_continuous_conversion()
 {
 	uint8_t conversionCounter = 0;
 	int32_t error_code = 0;
-	int32_t sample_data = 0;	
+	int32_t sample_data = 0;		
 	
 	//select continuous convertion mode, all zero
 	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf));
@@ -358,9 +369,7 @@ static int32_t do_continuous_conversion()
 
 	uint8_t channel_read = 0;
 	// Continuously read the channels, and store sample values		
-    while (isConnected) {
-		
-
+    while (notify_ad_buffer_on) {
 		/*
 		*  this polls the status register READY/ bit to determine when conversion is done
 		*  this also ensures the STATUS register value is up to date and contains the
@@ -387,9 +396,10 @@ static int32_t do_continuous_conversion()
 			}
 									
 			LOG_INF("%i", sample_data);			
-			
+						
 			conversionBuffer[conversionCounter] = sample_data;
-			if(conversionCounter > conversionBufSize -1) {
+			conversionCounter++;
+			if(conversionCounter >= conversionBufSize) {
 				conversionCounter = 0;
 				//prepare data
 				memcpy(ad7124_ble_buff, conversionBuffer, conversionBufSize * sizeof(uint32_t));
@@ -545,7 +555,7 @@ static int32_t do_fullscale_calibration() {
 }
 
 
-
+#define ad7124ChipId 0x14
 
 /*!
  * @brief      reads the ID register on the AD7124
@@ -581,9 +591,11 @@ int init_ad7124(void) {
 		LOG_ERR("error reading id");
 		return -1;
 	}
-	if(chipId != 0x14) {
+	if(chipId != ad7124ChipId) {
 		LOG_ERR("id incorrect: %#02x, but expected 0x14", chipId);
 		return -1;
+	} else {
+		LOG_INF("chip id verified: %d", ad7124ChipId);
 	}
 	return 0;
 }
@@ -596,6 +608,12 @@ static struct bt_gatt_cb gatt_callbacks = {
 
 int ble_load(void)
 {		
+	k_work_queue_init(&my_work_q);
+
+	k_work_queue_start(&my_work_q, my_stack_area,
+					   K_THREAD_STACK_SIZEOF(my_stack_area), 95,
+					   NULL);	
+
 	LOG_INF("loading ble");
 	int err;
 

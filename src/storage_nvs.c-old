@@ -39,6 +39,31 @@ static int flash_set_suspend() {
 	return ret;	
 }
 
+int init_external_storage(void) {	
+	LOG_INF("init storage");
+    int rc = 0;	
+	
+	spi_flash_dev = DEVICE_DT_GET(DT_ALIAS(spi_flash0));	
+	if (!device_is_ready(spi_flash_dev)) {
+		LOG_ERR("%s: device not ready.\n", spi_flash_dev->name);
+		return rc;
+	}
+	
+    struct flash_pages_info info;
+
+	LOG_INF("flash device found: %s", spi_flash_dev->name);	
+	
+	rc = flash_get_page_info_by_offs(spi_flash_dev, 0, &info);
+	if (rc) {
+		LOG_ERR("Unable to get page info\n");
+		return rc;
+	}
+		
+	rc |= flash_set_suspend();	
+	return rc;
+}
+
+
 int init_internal_storage() {
     
 	LOG_INF("init internal storage");
@@ -62,11 +87,7 @@ int init_internal_storage() {
 		LOG_ERR("Unable to get page info\n");
 		return -1;
 	}
-    rc = flash_set_suspend();
-    if(rc) {
-        LOG_ERR("unable to suspend external flash");
-        return -1;
-    }
+  
 
 	fs.sector_size = info.size;
 	fs.sector_count = (DT_REG_SIZE(DT_NODELABEL(storage_partition)) / info.size); 
@@ -81,4 +102,17 @@ int init_internal_storage() {
 	return rc;
 }
 
-SYS_INIT(init_internal_storage, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+int init_storage_module() {
+	int err = 0;
+	err |= init_external_storage();
+	if(err) {
+		LOG_ERR("init storage failed");
+	}
+	err |= init_internal_storage();
+	if(err) {
+		LOG_ERR("init internal storage failed");
+	}
+	return err;
+}
+
+SYS_INIT(init_storage_module, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
