@@ -274,6 +274,8 @@ int32_t ad7124_wait_for_spi_ready(struct ad7124_dev *dev,
 	regs = dev->regs;
 
 	while(!ready && --timeout) {
+
+		
 		/* Read the value of the Error Register */
 		ret = ad7124_read_register(dev, &regs[AD7124_Error]);
 		if(ret < 0) {
@@ -284,8 +286,7 @@ int32_t ad7124_wait_for_spi_ready(struct ad7124_dev *dev,
 		
 		/* Check the SPI IGNORE Error bit in the Error Register */
 		ready = (regs[AD7124_Error].value &
-			 AD7124_ERR_REG_SPI_IGNORE_ERR) == 0;
-		dev->ptDelay(100);
+			 AD7124_ERR_REG_SPI_IGNORE_ERR) == 0;		
 	}
 	if(!timeout) LOG_ERR("timeout occured");
 
@@ -356,8 +357,7 @@ int32_t ad7124_wait_for_conv_ready(struct ad7124_dev *dev,
 
 		/* Check the RDY bit in the Status Register */
 		ready = (regs[AD7124_Status].value &
-			 AD7124_STATUS_REG_RDY) == 0;
-		dev->ptDelay(200);
+			 AD7124_STATUS_REG_RDY) == 0;		
 	}
 
 	return timeout ? 0 : TIMEOUT;

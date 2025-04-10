@@ -31,12 +31,21 @@ int read_uniqueidentifier(uint16_t *identifier) {
 	return 0;
 }
 
-static int flash_set_suspend() {
+static int flash_set_suspend() {  
 	int ret = pm_device_action_run(spi_flash_dev, PM_DEVICE_ACTION_SUSPEND);
 	if(ret) { 
-		LOG_ERR("could not suspend qspi flash device %s", spi_flash_dev->name);
+		LOG_ERR("could not suspend qspi flash device %d, %s", ret, spi_flash_dev->name);
+		return ret;	
 	}
-	return ret;	
+	
+	LOG_INF("qspi suspended");
+	// ret = pm_device_action_run(spi_flash_dev, PM_DEVICE_ACTION_TURN_OFF);
+	// if(ret) {
+	// 	LOG_ERR("could not turn of qspi flash, %d, %s", ret, spi_flash_dev->name);
+	// 	return ret;
+	// }		
+	// LOG_INF("qspi turned off");
+	return 0;
 }
 
 int init_external_storage(void) {	
@@ -76,28 +85,29 @@ int init_internal_storage() {
 	fs.flash_device = flash_dev;
     int rc = 0;	
 
-    struct flash_pages_info info;
+    // struct flash_pages_info info;
 
-	LOG_INF("flash device found: %s", fs.flash_device->name);
+	// LOG_INF("flash device found: %s", fs.flash_device->name);
 		
-	fs.offset = DT_REG_SIZE(DT_NODELABEL(storage_partition)); 			
+	// fs.offset = DT_REG_SIZE(DT_NODELABEL(storage_partition)); 			
 	
-	rc = flash_get_page_info_by_offs(fs.flash_device, fs.offset, &info);
-	if (rc) {
-		LOG_ERR("Unable to get page info\n");
-		return -1;
-	}
+	// rc = flash_get_page_info_by_offs(fs.flash_device, fs.offset, &info);
+	// if (rc) {
+	// 	LOG_ERR("Unable to get page info\n");
+	// 	return -1;
+	// }
   
 
-	fs.sector_size = info.size;
-	fs.sector_count = (DT_REG_SIZE(DT_NODELABEL(storage_partition)) / info.size); 
+	// fs.sector_size = info.size;
+	// fs.sector_count = (DT_REG_SIZE(DT_NODELABEL(storage_partition)) / info.size); 
 
-	rc = nvs_mount(&fs);
-	LOG_INF("fs sector size = %d", info.size);
-	if (rc) {
-		LOG_ERR("Flash Init failed\n");
-		return -1;
-	}  		
+	//todo:implement nvs
+	// rc = nvs_mount(&fs);
+	// LOG_INF("fs sector size = %d", info.size);
+	// if (rc) {
+	// 	LOG_ERR("Flash Init failed\n");
+	// 	return -1;
+	// }  		
 
 	return rc;
 }

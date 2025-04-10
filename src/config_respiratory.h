@@ -15,7 +15,7 @@ Copyright (c) 2019 Analog Devices, Inc.
 #include "ad7124_regs.h"
 
 #define boardname "respiratory"
-#define filterFS 720
+#define filterFS 120
 
 const static struct ad7124_st_reg ad7124_regs_config_b[AD7124_REG_NO] = {
     {0x00, 0x00,   1, 2}, /* AD7124_Status */
@@ -28,7 +28,7 @@ const static struct ad7124_st_reg ad7124_regs_config_b[AD7124_REG_NO] = {
 	{0x07, AD7124_ERREN_REG_ADC_SAT_ERR_EN | AD7124_ERREN_REG_ADC_CONV_ERR_EN | AD7124_ERREN_REG_ADC_CAL_ERR_EN | 
 	AD7124_ERREN_REG_SPI_IGNORE_ERR_EN | AD7124_ERREN_REG_AINM_OV_ERR_EN | AD7124_ERREN_REG_AINM_UV_ERR_EN | AD7124_ERREN_REG_REF_DET_ERR_EN, 3, 1}, /* AD7124_Error_En (enable everything here asap) */
 	{0x08, 0x0001,   1, 2}, /* AD7124_Mclk_Count */
-	{0x09, AD7124_CH_MAP_REG_CH_ENABLE | AD7124_CH_MAP_REG_SETUP(0) | AD7124_CH_MAP_REG_AINP(8) | AD7124_CH_MAP_REG_AINM(9), 2, 1}, /* AD7124_Channel_0 */
+	{0x09, AD7124_CH_MAP_REG_CH_ENABLE | AD7124_CH_MAP_REG_SETUP(0) | AD7124_CH_MAP_REG_AINP(1) | AD7124_CH_MAP_REG_AINM(0), 2, 1}, /* AD7124_Channel_0 */
 	{0x0A, 0x0001, 2, 1}, /* AD7124_Channel_1 */
 	{0x0B, 0x0001, 2, 1}, /* AD7124_Channel_2 */
 	{0x0C, 0x0001, 2, 1}, /* AD7124_Channel_3 */

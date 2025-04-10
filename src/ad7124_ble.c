@@ -13,8 +13,9 @@ Copyright (c) 2019 Analog Devices, Inc.  All rights reserved.
 #include <zephyr/drivers/gpio.h>                                                                                                                                                     
 #include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
-
+#include <zephyr/pm/device.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/drivers/regulator.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
@@ -29,6 +30,9 @@ Copyright (c) 2019 Analog Devices, Inc.  All rights reserved.
 
 #include "ad7124_ble.h"
 #include "config_respiratory.h"
+
+#include "nrfx.h"
+#include "hal/nrf_gpio.h"
 
 #define SPI_OP  SPI_OP_MODE_MASTER |SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8) | SPI_LINES_SINGLE
 
@@ -46,6 +50,21 @@ LOG_MODULE_REGISTER(AD7124_BLE, LOG_LEVEL_INF);
 #define SPIOP      SPI_WORD_SET(8) | SPI_TRANSFER_MSB
 
 const struct spi_dt_spec spiDevice = SPI_DT_SPEC_GET(DT_NODELABEL(gendev), SPIOP, 0);
+
+
+const struct device *const gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+
+void disable_spi_cs_pin(void)
+{
+    // Reconfigure P1.12 as a low-power input (disconnected, no pull)
+    NRF_P1->PIN_CNF[12] =
+        (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+        (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos) |
+        (GPIO_PIN_CNF_PULL_Disabled << GPIO_PIN_CNF_PULL_Pos) |
+        (GPIO_PIN_CNF_DRIVE_S0S1 << GPIO_PIN_CNF_DRIVE_Pos) |
+        (GPIO_PIN_CNF_SENSE_Disabled << GPIO_PIN_CNF_SENSE_Pos);
+}
+
 static void start_ad7124(struct k_work *ptr_work);
 /*
  * @brief  Write generic device register (platform dependent)
@@ -66,7 +85,6 @@ static void start_ad7124(struct k_work *ptr_work);
 // static struct bt_uuid_128 uuid_identifier = BT_UUID_INIT_128(
 // 	BT_UUID_128_ENCODE(0x56a331ec, 0x0319, 0x493e, 0xbd4d, 0xe778c69badd7));
 
-//current memory position
 static struct bt_uuid_128 uuid_data = BT_UUID_INIT_128(
 	BT_UUID_128_ENCODE(0x84b45e35, 0x140b, 0x4d33, 0x92c6, 0x386d8bff160d));
 
@@ -86,6 +104,7 @@ static struct bt_uuid_128 uuid_data = BT_UUID_INIT_128(
 
 static int32_t do_continuous_conversion();
 static int32_t do_fullscale_calibration();
+static int32_t set_idle_mode();
 
 // static ssize_t write_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 // 	const void *buf, uint16_t len, uint16_t offset,
@@ -181,6 +200,8 @@ void ble_notify_adbuffer_proc(struct k_work *ptrWorker) {
 	}
 }
 
+int init_ad7124(void);
+
 //advertising data packet
 const struct bt_data ad[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
@@ -190,8 +211,10 @@ const struct bt_data ad[] = {
 
 static void start_ad7124(struct k_work *ptr_work) {
 	int err =0;
+	err |= init_ad7124();
 	err |= do_fullscale_calibration();
 	err |= do_continuous_conversion();
+	err |= set_idle_mode();
 	if(err) {
 		LOG_ERR("error start ad %d", err);		
 	}	
@@ -219,6 +242,11 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 };
 
 
+#define BT_LE_ADV_CONN_CUSTOM BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE, \
+	BT_GAP_ADV_SLOW_INT_MIN, \
+	BT_GAP_ADV_SLOW_INT_MAX, NULL)
+
+	
 static void bt_ready(void)
 {
 	int err;
@@ -229,7 +257,7 @@ static void bt_ready(void)
 		settings_load();
 	}
 
-	err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
+	err = bt_le_adv_start(BT_LE_ADV_CONN_CUSTOM, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)\n", err);
 		return;
@@ -283,20 +311,15 @@ static struct ad7124_dev pAd7124_dev = {0};
  * @details    This resets and then writes the default register map value to
  *  		   the device.
  */
-int32_t ad7124_app_initialize(uint8_t configID)
+int32_t ad7124_app_initialize()
 {
 	/*
 	 * Copy one of the default/user configs to the live register memory map
 	 * Requirement, not checked here, is that all the configs are the same size
 	 */	
-
-	switch(configID) {
-		case AD7124_CONFIG_A:
-		{
-			memcpy(ad7124_register_map, ad7124_regs_config_b, sizeof(ad7124_register_map));
-			break;
-		}	
-	}
+	
+	memcpy(ad7124_register_map, ad7124_regs_config_b, sizeof(ad7124_register_map));
+	
 	pAd7124_dev.tranceiver = platform_transceive;	
 	pAd7124_dev.ptDelay = platform_delay;
 
@@ -329,10 +352,27 @@ static int32_t set_idle_mode() {
 	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf)); //clear mode bits	
 	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(4); //idle mode
 	if ( (error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]) ) < 0) {
-		LOG_ERR("Error (%d) setting AD7124 power mode to low.\r\n", error_code);				
+		LOG_ERR("Error (%d) set idle mode", error_code);				
 	} else {
 		LOG_INF("idle mode activated\n");
 	}
+	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf)); //clear mode bits	
+	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(0b011); //power down mode
+	if ( (error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]) ) < 0) {
+		LOG_ERR("Error (%d) setting power down mode", error_code);				
+	} else {
+		LOG_INF("power down mode activated\n");
+	}
+
+	error_code |= pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_SUSPEND);		
+	if(error_code) {
+		LOG_ERR("failed to suspend spi devie");
+		return error_code;
+	}		
+	disable_spi_cs_pin();
+
+	gpio_pin_set(gpio1_dev, 11, 0);	
+	
 	return error_code;
 }
 
@@ -410,7 +450,6 @@ static int32_t do_continuous_conversion()
 		}				
 	}    
 
-	error_code = set_idle_mode();
 	if (error_code < 0) LOG_ERR("error occured continuous conversion");
 	return error_code;
 }
@@ -547,10 +586,6 @@ static int32_t do_fullscale_calibration() {
 		}
 	}
 	
-	error_code = set_idle_mode();
-	if(error_code != 0) {		
-		LOG_ERR("error fullscale calibraion");
-	}
 	return error_code;
 }
 
@@ -574,14 +609,17 @@ static int read_id(uint8_t *id)
 	return err;	
 }
 
-int init_ad7124(void) {	
-	LOG_INF("initiating ad7124..");
+int init_ad7124(void) {		
+	LOG_INF("initiating ad7124..");		
 	int err = 0;
-		
-	bool spiReady = spi_is_ready_dt(&spiDevice);
-	if(!spiReady) LOG_ERR("Error: SPI device is not ready: %d", spiReady);
+	
+	
+	gpio_pin_set(gpio1_dev, 11, 1);
+
+	pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_RESUME);	
+	
 	uint8_t chipId =0;
-	err |= ad7124_app_initialize(AD7124_CONFIG_A);	
+	err |= ad7124_app_initialize();	
 	if(err) {
 		LOG_ERR("error initializing ad7124");
 		return -1;
@@ -629,10 +667,44 @@ int ble_load(void)
 	bt_conn_auth_cb_register(&auth_cb_display);
 
 	//clean up bonds
-	bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
+	//bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);	
+	
 	return 0;
 }
 
 
+
+//#include <zephyr/sys/poweroff.h>
+int spi_load() {
+	
+	
+	k_sleep(K_SECONDS(2));
+	int err = 0;
+	bool spiReady = spi_is_ready_dt(&spiDevice);
+	if(!spiReady) {
+		 LOG_ERR("Error: SPI device is not ready");	
+		 return -1;
+	}
+	// err |= spi_release(spiDevice.bus, &spiDevice.config);
+	// if(err !=0) {
+	// 	LOG_ERR("error releasing spi port %d", err);
+	// 	return err;
+	// }		
+
+
+	
+
+	//NRF_SPI0->ENABLE = SPI_ENABLE_ENABLE_Disabled << SPI_ENABLE_ENABLE_Pos;
+	//sys_poweroff();
+	
+
+	err|= gpio_pin_configure(gpio1_dev, 11, GPIO_OUTPUT); 
+	if(err != 0) {
+		LOG_ERR("error configure output pin %d", err);
+		return err;
+	}
+	return err;
+}
+
+SYS_INIT(spi_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 SYS_INIT(ble_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
-SYS_INIT(init_ad7124, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
