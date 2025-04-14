@@ -54,17 +54,6 @@ const struct spi_dt_spec spiDevice = SPI_DT_SPEC_GET(DT_NODELABEL(gendev), SPIOP
 
 const struct device *const gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
-void disable_spi_cs_pin(void)
-{
-    // Reconfigure P1.12 as a low-power input (disconnected, no pull)
-    NRF_P1->PIN_CNF[12] =
-        (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
-        (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos) |
-        (GPIO_PIN_CNF_PULL_Disabled << GPIO_PIN_CNF_PULL_Pos) |
-        (GPIO_PIN_CNF_DRIVE_S0S1 << GPIO_PIN_CNF_DRIVE_Pos) |
-        (GPIO_PIN_CNF_SENSE_Disabled << GPIO_PIN_CNF_SENSE_Pos);
-}
-
 static void start_ad7124(struct k_work *ptr_work);
 /*
  * @brief  Write generic device register (platform dependent)
@@ -103,8 +92,12 @@ static struct bt_uuid_128 uuid_data = BT_UUID_INIT_128(
 // }
 
 static int32_t do_continuous_conversion();
+int ad7124_set_power_down_mode();
 static int32_t do_fullscale_calibration();
-static int32_t set_idle_mode();
+int ad7124_set_idle_mode();
+
+int enable_spi();
+int disable_spi();
 
 // static ssize_t write_identifier(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 // 	const void *buf, uint16_t len, uint16_t offset,
@@ -200,6 +193,14 @@ void ble_notify_adbuffer_proc(struct k_work *ptrWorker) {
 	}
 }
 
+int powerup_ad7124(){
+	return gpio_pin_set(gpio1_dev, 11, 1);
+}
+
+int powerdown_ad7124() {
+	return gpio_pin_set(gpio1_dev, 11, 0);
+}
+
 int init_ad7124(void);
 
 //advertising data packet
@@ -209,15 +210,28 @@ const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_BAS_VAL), BT_UUID_16_ENCODE(BT_UUID_CTS_VAL)),
 };
 
+typedef int (*func_type)(void);
+#define conversionSequence 8
+static func_type functions[conversionSequence] = {
+	&powerup_ad7124, 
+	&enable_spi,
+	&init_ad7124,
+	&do_fullscale_calibration,
+	&do_continuous_conversion,
+	&ad7124_set_power_down_mode,
+	&disable_spi,
+	&powerdown_ad7124
+};
+
 static void start_ad7124(struct k_work *ptr_work) {
 	int err =0;
-	err |= init_ad7124();
-	err |= do_fullscale_calibration();
-	err |= do_continuous_conversion();
-	err |= set_idle_mode();
-	if(err) {
-		LOG_ERR("error start ad %d", err);		
-	}	
+	for(int i = 0; i < conversionSequence; i++) {
+		err = functions[i]();
+		if(err) {
+			LOG_ERR("error conversion task: %d, code: %d ", i, err);		
+			return;
+		}	
+	}
 }
 
 
@@ -347,15 +361,46 @@ int32_t ad7124_app_initialize()
 // 	}
 // }
 
-static int32_t set_idle_mode() {
-	int32_t error_code = 0;
+int enable_spi() {	
+	//enable spi_ss pin (power savings)
+	NRF_P1->PIN_CNF[12] |= (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
+	return pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_RESUME);	
+}
+
+int disable_spi() {
+	int err = pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_SUSPEND);		
+	if(err) {
+		LOG_ERR("failed to suspend spi devie");
+		return err;
+	}		
+	//disable spi_ss pin (power savings)
+	NRF_P1->PIN_CNF[12] &= ~(GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos); 
+	
+	return 0;
+}
+
+int ad7124_set_idle_mode() {
+	int error_code = 0;
 	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf)); //clear mode bits	
-	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(4); //idle mode
+	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(0b0100); //idle mode
 	if ( (error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]) ) < 0) {
 		LOG_ERR("Error (%d) set idle mode", error_code);				
 	} else {
 		LOG_INF("idle mode activated\n");
 	}
+	return error_code;
+}
+
+int ad7124_set_power_down_mode() {
+	int error_code = 0;
+	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf)); //clear mode bits	
+	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(0b0010); //standby mode/
+	if ( (error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]) ) < 0) {
+		LOG_ERR("Error (%d) set standby mode", error_code);				
+	} else {
+		LOG_INF("standby mode activated\n");
+	}
+	k_sleep(K_MSEC(10));
 	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf)); //clear mode bits	
 	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_MODE(0b011); //power down mode
 	if ( (error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]) ) < 0) {
@@ -363,15 +408,7 @@ static int32_t set_idle_mode() {
 	} else {
 		LOG_INF("power down mode activated\n");
 	}
-
-	error_code |= pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_SUSPEND);		
-	if(error_code) {
-		LOG_ERR("failed to suspend spi devie");
-		return error_code;
-	}		
-	disable_spi_cs_pin();
-
-	gpio_pin_set(gpio1_dev, 11, 0);	
+	k_sleep(K_MSEC(10));	
 	
 	return error_code;
 }
@@ -387,7 +424,7 @@ uint32_t conversionBuffer[conversionBufSize];
  *            and assigned to the channel they come from. Escape key an be used
  *            to exit the loop
  */
-static int32_t do_continuous_conversion()
+int do_continuous_conversion()
 {
 	uint8_t conversionCounter = 0;
 	int32_t error_code = 0;
@@ -538,7 +575,7 @@ static int32_t switch_channel(bool enable, enum ad7124_registers channel) {
 	return error_code;
 }
 
-static int32_t do_fullscale_calibration() {	
+int do_fullscale_calibration() {	
 	int32_t error_code = 0;	
 	int32_t enabled_channels = 0;
 
@@ -611,12 +648,7 @@ static int read_id(uint8_t *id)
 
 int init_ad7124(void) {		
 	LOG_INF("initiating ad7124..");		
-	int err = 0;
-	
-	
-	gpio_pin_set(gpio1_dev, 11, 1);
-
-	pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_RESUME);	
+	int err = 0;		
 	
 	uint8_t chipId =0;
 	err |= ad7124_app_initialize();	
@@ -676,33 +708,22 @@ int ble_load(void)
 
 //#include <zephyr/sys/poweroff.h>
 int spi_load() {
-	
-	
-	k_sleep(K_SECONDS(2));
+		
 	int err = 0;
 	bool spiReady = spi_is_ready_dt(&spiDevice);
 	if(!spiReady) {
 		 LOG_ERR("Error: SPI device is not ready");	
 		 return -1;
-	}
-	// err |= spi_release(spiDevice.bus, &spiDevice.config);
-	// if(err !=0) {
-	// 	LOG_ERR("error releasing spi port %d", err);
-	// 	return err;
-	// }		
+	}	
 
-
-	
-
-	//NRF_SPI0->ENABLE = SPI_ENABLE_ENABLE_Disabled << SPI_ENABLE_ENABLE_Pos;
-	//sys_poweroff();
-	
-
-	err|= gpio_pin_configure(gpio1_dev, 11, GPIO_OUTPUT); 
+	err |= gpio_pin_configure(gpio1_dev, 11, GPIO_OUTPUT); 
 	if(err != 0) {
 		LOG_ERR("error configure output pin %d", err);
 		return err;
-	}
+	}		
+	
+	disable_spi();
+
 	return err;
 }
 
