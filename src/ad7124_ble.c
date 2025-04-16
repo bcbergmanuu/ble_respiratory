@@ -215,7 +215,7 @@ typedef int (*func_type)(void);
 static func_type functions[conversionSequence] = {
 	&powerup_ad7124, 
 	&enable_spi,
-	&init_ad7124,
+	&init_ad7124,	
 	&do_fullscale_calibration,
 	&do_continuous_conversion,
 	&ad7124_set_power_down_mode,
@@ -225,7 +225,7 @@ static func_type functions[conversionSequence] = {
 
 static void start_ad7124(struct k_work *ptr_work) {
 	int err =0;
-	for(int i = 0; i < conversionSequence; i++) {
+	for(int i = 0; i < conversionSequence; i++) {		
 		err = functions[i]();
 		if(err) {
 			LOG_ERR("error conversion task: %d, code: %d ", i, err);		
@@ -254,12 +254,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,	
 };
-
-
-#define BT_LE_ADV_CONN_CUSTOM BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE, \
-	BT_GAP_ADV_SLOW_INT_MIN, \
-	BT_GAP_ADV_SLOW_INT_MAX, NULL)
-
 	
 static void bt_ready(void)
 {
@@ -271,7 +265,7 @@ static void bt_ready(void)
 		settings_load();
 	}
 
-	err = bt_le_adv_start(BT_LE_ADV_CONN_CUSTOM, ad, ARRAY_SIZE(ad), NULL, 0);
+	err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)\n", err);
 		return;
@@ -303,9 +297,9 @@ static int32_t platform_transceive(void *handle, uint8_t *bufw, uint8_t *bufr,
 	return err;	
 }
 
-static void platform_delay(uint32_t ms) {	
-	k_sleep(K_MSEC(ms));
-}
+// static void platform_delay(uint32_t ms) {	
+// 	k_sleep(K_MSEC(ms));
+// }
 
 
 /*
@@ -318,6 +312,23 @@ static struct ad7124_st_reg ad7124_register_map[AD7124_REG_NO];
 static struct ad7124_dev pAd7124_dev = {0};
 
 // Public Functions
+int checkregs(struct ad7124_dev *device) {
+	enum ad7124_registers reg_nr;			
+	int ret = 0;
+	for(reg_nr = AD7124_Status; (reg_nr < AD7124_Offset_0); reg_nr++) {		
+		ret = ad7124_read_register(device, &device->regs[reg_nr]);
+		if (ret < 0) {
+			LOG_ERR("error setup writing %d", reg_nr);
+			return -1;
+		}		
+		LOG_INF("register: %d, value %d", reg_nr, device->regs[reg_nr].value);
+	}
+	return ret;
+}
+
+void platformdelay(uint32_t ms) {
+	k_sleep(K_USEC(ms));
+}
 
 /*!
  * @brief      Initialize the AD7124 device and the SPI port as required
@@ -335,16 +346,19 @@ int32_t ad7124_app_initialize()
 	memcpy(ad7124_register_map, ad7124_regs_config_b, sizeof(ad7124_register_map));
 	
 	pAd7124_dev.tranceiver = platform_transceive;	
-	pAd7124_dev.ptDelay = platform_delay;
+	pAd7124_dev.ptDelay = platformdelay;
 
 	// Used to create the ad7124 device
-    pAd7124_dev.regs = ad7124_register_map,
+    pAd7124_dev.regs = ad7124_register_map;	
   	pAd7124_dev.spi_rdy_poll_cnt = 	10000; // Retry count for polling
   	
 	int ret = ad7124_setup(&pAd7124_dev);
 
+	ret |= checkregs(&pAd7124_dev);
+
   	return ret;
 }
+
 
 // /*!
 //  * @brief      reads and displays the status register on the AD7124
@@ -364,7 +378,10 @@ int32_t ad7124_app_initialize()
 int enable_spi() {	
 	//enable spi_ss pin (power savings)
 	NRF_P1->PIN_CNF[12] |= (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos);
-	return pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_RESUME);	
+	
+	int err =  pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_RESUME);	
+	return err == -120 ? 0 : err;
+	
 }
 
 int disable_spi() {
@@ -431,12 +448,9 @@ int do_continuous_conversion()
 	int32_t sample_data = 0;		
 	
 	//select continuous convertion mode, all zero
-	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf));
-
-	
-	//select full power
-	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_POWER_MODE(0x3));
-	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_POWER_MODE(0x2);
+	pAd7124_dev.regs[AD7124_ADC_Control].value &= ~(AD7124_ADC_CTRL_REG_MODE(0xf));	
+	//select full power	
+	pAd7124_dev.regs[AD7124_ADC_Control].value |= AD7124_ADC_CTRL_REG_POWER_MODE(0b11);
 
 	error_code = ad7124_write_register(&pAd7124_dev, pAd7124_dev.regs[AD7124_ADC_Control]);
 	if(error_code) {
@@ -455,24 +469,26 @@ int do_continuous_conversion()
 		*  enabling the DATA_STATUS bit means that status is appended to ADC data read
 		*  so the channel being sampled is read back (and updated) as part of the same frame
 		*/
-		if ( (error_code = ad7124_wait_for_conv_ready(&pAd7124_dev, 10000)) < 0) {
+			
+		if ( (error_code = ad7124_wait_for_conv_ready(&pAd7124_dev, 1000)) < 0) {
 				LOG_ERR("Error/Timeout waiting for conversion ready %d\n", error_code);
 				return -1;
 			}
+		
 		channel_read = pAd7124_dev.regs[AD7124_Status].value & 0x0000000F;
 		if(pAd7124_dev.regs[AD7124_Channel_0 + channel_read].value & AD7124_CH_MAP_REG_CH_ENABLE) {
 
 			if ( (error_code = ad7124_read_data(&pAd7124_dev, &sample_data)) < 0) {
 				LOG_ERR("Error reading ADC Data (%d).\r\n", error_code);
 				return -1;
-			}
+			}			
 			
 			if (!channel_read == 0) {	
 			
 				LOG_INF("Label");
 			}
 									
-			LOG_INF("%i", sample_data);			
+			LOG_INF("sample: %i", sample_data);			
 						
 			conversionBuffer[conversionCounter] = sample_data;
 			conversionCounter++;
@@ -667,6 +683,7 @@ int init_ad7124(void) {
 	} else {
 		LOG_INF("chip id verified: %d", ad7124ChipId);
 	}
+	
 	return 0;
 }
 

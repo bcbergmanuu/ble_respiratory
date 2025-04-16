@@ -157,7 +157,7 @@ int32_t ad7124_no_check_write_register(struct ad7124_dev *dev,
 	// 			 (dev->use_crc != AD7124_DISABLE_CRC) ? reg.size + 2
 	// 			 : reg.size + 1);
 
-	ret = dev->tranceiver(dev->handle, rd_buf, wr_buf, (dev->use_crc != AD7124_DISABLE_CRC) ? reg.size + 2 : reg.size + 1);
+	ret = dev->tranceiver(dev->handle, wr_buf, rd_buf, (dev->use_crc != AD7124_DISABLE_CRC) ? reg.size + 2 : reg.size + 1);
 
 	return ret;
 }
@@ -244,11 +244,7 @@ int32_t ad7124_reset(struct ad7124_dev *dev)
 
 	/* Read POR bit to clear */
 	ret = ad7124_wait_to_power_on(dev, dev->spi_rdy_poll_cnt);
-
-	dev->ptDelay(200);
-
 	
-
 	return ret;
 }
 
@@ -355,11 +351,14 @@ int32_t ad7124_wait_for_conv_ready(struct ad7124_dev *dev,
 		if(ret < 0)
 			return ret;
 
+		dev->ptDelay(100);
 		/* Check the RDY bit in the Status Register */
 		ready = (regs[AD7124_Status].value &
-			 AD7124_STATUS_REG_RDY) == 0;		
+			 AD7124_STATUS_REG_RDY) == 0;				
 	}
-
+	if(timeout < 1)
+		LOG_ERR("timeout for conv_ready %d", timeout);
+	
 	return timeout ? 0 : TIMEOUT;
 }
 
@@ -489,7 +488,7 @@ int32_t ad7124_setup(struct ad7124_dev *device)
 
 	/* Update the device structure with power-on/reset settings */
 	device->check_ready = 1;
-
+	
 	/* Initialize registers AD7124_ADC_Control through AD7124_Filter_7. */
 	for(reg_nr = AD7124_Status; (reg_nr < AD7124_Offset_0) && !(ret < 0);
 	    reg_nr++) {
@@ -497,7 +496,7 @@ int32_t ad7124_setup(struct ad7124_dev *device)
 			ret = ad7124_write_register(device, device->regs[reg_nr]);
 			if (ret < 0) {
 				LOG_ERR("error setup writing %d", reg_nr);
-				return -1;
+				return ret;
 			}
 		}
 
@@ -510,3 +509,4 @@ int32_t ad7124_setup(struct ad7124_dev *device)
 
 	return ret;
 }
+

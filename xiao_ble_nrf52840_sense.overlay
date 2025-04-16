@@ -65,7 +65,7 @@
 	gendev: gendev@0 {
 		
 		compatible = "vnd,spi-device";
-		reg = <0>;
+		reg = <0>;		
 		spi-max-frequency = <DT_FREQ_M(1)>;
 		
 		label = "GenDev";
