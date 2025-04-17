@@ -19,7 +19,7 @@ Copyright (c) 2019 Analog Devices, Inc.
 
 const static struct ad7124_st_reg ad7124_regs_config_b[AD7124_REG_NO] = {
     {0x00, 0x00,   1, 2}, /* AD7124_Status */
-	{0x01, AD7124_ADC_CTRL_REG_POWER_MODE(0b10) | AD7124_ADC_CTRL_REG_MODE(0b0010) | AD7124_ADC_CTRL_REG_CLK_SEL(0) | AD7124_ADC_CTRL_REG_REF_EN, 2, 1}, /* AD7124_ADC_Control */
+	{0x01, AD7124_ADC_CTRL_REG_POWER_MODE(0b10) | AD7124_ADC_CTRL_REG_MODE(0b0010) | AD7124_ADC_CTRL_REG_CLK_SEL(0) | AD7124_ADC_CTRL_REG_REF_EN | AD7124_ADC_CTRL_REG_CS_EN, 2, 1}, /* AD7124_ADC_Control */
 	{0x02, 0x0000, 3, 2}, /* AD7124_Data */
 	{0x03, 0x0000, 3, 1}, /* AD7124_IOCon1 */
 	{0x04, 0x0000, 2, 1}, /* AD7124_IOCon2 */
@@ -43,7 +43,7 @@ const static struct ad7124_st_reg ad7124_regs_config_b[AD7124_REG_NO] = {
 	{0x16, 0x0000, 2, 1}, /* AD7124_Channel_13 */
 	{0x17, 0x0000, 2, 1}, /* AD7124_Channel_14 */
 	{0x18, 0x0000, 2, 1}, /* AD7124_Channel_15 */
-	{0x19, AD7124_CFG_REG_REF_SEL(0b10) | AD7124_CFG_REG_BIPOLAR | AD7124_CFG_REG_PGA(3), 2, 1}, /* AD7124_Config_0 */
+	{0x19, AD7124_CFG_REG_REF_SEL(0b10) | AD7124_CFG_REG_BIPOLAR | AD7124_CFG_REG_PGA(0), 2, 1}, /* AD7124_Config_0 */
 	{0x1A, 0x0860, 2, 1}, /* AD7124_Config_1 */
 	{0x1B, 0x0860, 2, 1}, /* AD7124_Config_2 */
 	{0x1C, 0x0860, 2, 1}, /* AD7124_Config_3 */

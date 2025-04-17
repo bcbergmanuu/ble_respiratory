@@ -193,11 +193,11 @@ void ble_notify_adbuffer_proc(struct k_work *ptrWorker) {
 	}
 }
 
-int powerup_ad7124(){
+int powerup_iopin(){
 	return gpio_pin_set(gpio1_dev, 11, 1);
 }
 
-int powerdown_ad7124() {
+int powerdown_iopin() {
 	return gpio_pin_set(gpio1_dev, 11, 0);
 }
 
@@ -212,26 +212,30 @@ const struct bt_data ad[] = {
 
 typedef int (*func_type)(void);
 #define conversionSequence 8
-static func_type functions[conversionSequence] = {
-	&powerup_ad7124, 
+static func_type connectionSequence[conversionSequence] = {
+	&powerup_iopin, 
 	&enable_spi,
 	&init_ad7124,	
 	&do_fullscale_calibration,
 	&do_continuous_conversion,
 	&ad7124_set_power_down_mode,
 	&disable_spi,
-	&powerdown_ad7124
+	&powerdown_iopin
 };
 
-static void start_ad7124(struct k_work *ptr_work) {
+void runSequence(func_type *sequence) {
 	int err =0;
 	for(int i = 0; i < conversionSequence; i++) {		
-		err = functions[i]();
+		err = connectionSequence[i]();
 		if(err) {
 			LOG_ERR("error conversion task: %d, code: %d ", i, err);		
 			return;
 		}	
 	}
+}
+
+static void start_ad7124(struct k_work *ptr_work) {
+	runSequence(connectionSequence);
 }
 
 
@@ -254,6 +258,10 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,	
 };
+
+#define BT_LE_ADV_CONN_CUSTOM BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE, \
+	BT_GAP_ADV_FAST_INT_MIN_2*5, \
+	BT_GAP_ADV_FAST_INT_MAX_2*5, NULL)
 	
 static void bt_ready(void)
 {
@@ -265,7 +273,7 @@ static void bt_ready(void)
 		settings_load();
 	}
 
-	err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
+	err = bt_le_adv_start(BT_LE_ADV_CONN_CUSTOM, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)\n", err);
 		return;
@@ -312,6 +320,7 @@ static struct ad7124_st_reg ad7124_register_map[AD7124_REG_NO];
 static struct ad7124_dev pAd7124_dev = {0};
 
 // Public Functions
+
 int checkregs(struct ad7124_dev *device) {
 	enum ad7124_registers reg_nr;			
 	int ret = 0;
@@ -325,6 +334,7 @@ int checkregs(struct ad7124_dev *device) {
 	}
 	return ret;
 }
+
 
 void platformdelay(uint32_t ms) {
 	k_sleep(K_USEC(ms));
@@ -354,7 +364,9 @@ int32_t ad7124_app_initialize()
   	
 	int ret = ad7124_setup(&pAd7124_dev);
 
+#ifdef CONFIG_LOG
 	ret |= checkregs(&pAd7124_dev);
+#endif
 
   	return ret;
 }
@@ -386,7 +398,7 @@ int enable_spi() {
 
 int disable_spi() {
 	int err = pm_device_action_run(spiDevice.bus, PM_DEVICE_ACTION_SUSPEND);		
-	if(err) {
+	if(err && err != -120) {
 		LOG_ERR("failed to suspend spi devie");
 		return err;
 	}		
@@ -434,6 +446,27 @@ int ad7124_set_power_down_mode() {
 uint32_t conversionBuffer[conversionBufSize];
 
 
+
+// static struct gpio_callback rdy_cb_data;
+
+// void rdy_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+// {
+//     // Only trigger this when SPI is idle!
+//     LOG_INF("~RDY went low - data ready!");
+
+//     // Schedule SPI read from ADC here
+// }
+
+// void configure_DRDY_interrupt(void)
+// {    
+//     gpio_pin_configure(gpio1_dev, 14, GPIO_INPUT | GPIO_PULL_UP); //XIAO mosi (DRY/DOUT)
+    
+
+//     gpio_init_callback(&rdy_cb_data, rdy_handler, BIT(14));
+//     gpio_add_callback(gpio1_dev, &rdy_cb_data);
+// }
+
+
 /*!
  * @brief      Continuously acquires samples in Continuous Conversion mode
  *
@@ -469,11 +502,14 @@ int do_continuous_conversion()
 		*  enabling the DATA_STATUS bit means that status is appended to ADC data read
 		*  so the channel being sampled is read back (and updated) as part of the same frame
 		*/
-			
+		//gpio_pin_interrupt_configure(gpio1_dev, 14, GPIO_INT_EDGE_TO_ACTIVE);
+
 		if ( (error_code = ad7124_wait_for_conv_ready(&pAd7124_dev, 1000)) < 0) {
 				LOG_ERR("Error/Timeout waiting for conversion ready %d\n", error_code);
 				return -1;
 			}
+
+		//gpio_pin_interrupt_configure(gpio1_dev, 14, GPIO_INT_DISABLE);
 		
 		channel_read = pAd7124_dev.regs[AD7124_Status].value & 0x0000000F;
 		if(pAd7124_dev.regs[AD7124_Channel_0 + channel_read].value & AD7124_CH_MAP_REG_CH_ENABLE) {
@@ -721,10 +757,18 @@ int ble_load(void)
 	return 0;
 }
 
+static func_type startupSequence[conversionSequence] = {
+	&powerup_iopin, 
+	&enable_spi,
+	&init_ad7124,	
+	&ad7124_set_power_down_mode,
+	&disable_spi,
+	&powerdown_iopin
+};
 
 
 //#include <zephyr/sys/poweroff.h>
-int spi_load() {
+int startupConfigure() {
 		
 	int err = 0;
 	bool spiReady = spi_is_ready_dt(&spiDevice);
@@ -739,10 +783,10 @@ int spi_load() {
 		return err;
 	}		
 	
-	disable_spi();
+	runSequence(startupSequence);
 
 	return err;
 }
 
-SYS_INIT(spi_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+SYS_INIT(startupConfigure, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 SYS_INIT(ble_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
